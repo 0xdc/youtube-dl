@@ -5,6 +5,8 @@ from .common import InfoExtractor
 from ..compat import (
     compat_HTTPError,
     compat_str,
+    compat_urllib_parse_urlencode,
+    compat_urlparse,
 )
 from ..utils import (
     ExtractorError,
@@ -134,4 +136,139 @@ class RoosterTeethIE(InfoExtractor):
             'formats': formats,
             'channel_id': attributes.get('channel_id'),
             'duration': int_or_none(attributes.get('length')),
+        }
+
+
+class RoosterTeethSeriesIE(RoosterTeethIE):
+    _IE_NAME = 'roosterteeth:playlist'
+    _VALID_URL = r'https://roosterteeth.com/series/(?P<id>[\w\d\-]+)'
+
+    _TESTS = [
+        {
+            'url': 'https://roosterteeth.com/series/sunday-driving',
+            'playlist_count': 3,
+            'info_dict': {
+                'id': 'sunday-driving',
+                'title': 'Sunday Driving',
+            }
+        },
+        {
+            # One season public, season 2 is first-only
+            'url': 'https://roosterteeth.com/series/achievement-haunter',
+            'playlist_mincount': 18,
+            'info_dict': {
+                'id': 'achievement-haunter',
+                'title': 'Haunter',
+            }
+        },
+        {
+            'url': 'https://roosterteeth.com/series/7-wonderings',
+            'playlist_mincount': 7,
+            'info_dict': {
+                'id': '7-wonderings',
+                'title': '7 Wonderings',
+            },
+        },
+        {
+            'url': 'https://roosterteeth.com/series/lets-play',
+            'playlist_mincount': 205,
+            'info_dict': {
+                'id': 'lets-play',
+                'title': "Let's Play",
+            },
+        },
+        {
+            'url': 'https://roosterteeth.com/series/let-s-play-live-life-on-tour',
+            'playlist_count': 7,
+            'info_dict': {
+                'id': 'let-s-play-live-life-on-tour',
+                'title': "Let's Play Live: Life on Tour",
+            },
+        },
+    ]
+
+    domain = 'https://roosterteeth.com'
+    api_domain = 'https://svod-be.roosterteeth.com'
+
+    @classmethod
+    def _add_per_page(cls, url, count=None):
+        """
+        Add the query string per_page to increase the number of results from the API
+
+        The API defaults to a per_page of 24, any series with more videos than this needs
+        either pagination or a per_page increase
+        """
+        if count is None:
+            count = 1000
+
+        return cls._set_query_string(url, 'per_page', count)
+
+    @staticmethod
+    def _set_query_string(url, key, value):
+        parsed_url = compat_urlparse.urlparse(url)
+        qs = compat_urlparse.parse_qs(parsed_url.query)
+        qs[key] = [value]
+        return compat_urlparse.urlunparse(
+            parsed_url._replace(query=compat_urllib_parse_urlencode(qs, True)))
+
+    def get_season_episodes_pages(self, episode_link, season_slug, page=None):
+        if page is None:
+            page = 1
+
+        entries = []
+
+        se_page = self._download_json(
+            self._add_per_page(self._set_query_string(episode_link, "page", page)),
+            "_".join([season_slug, str(page)])
+        )
+
+        assert page == se_page['page']
+
+        for link in se_page['data']:
+            entries.append(self.domain + link['canonical_links']['self'])
+
+        if se_page['page'] < se_page['total_pages']:
+            entries.extend(
+                self.get_season_episodes_pages(
+                    episode_link,
+                    season_slug,
+                    page + 1,
+                )
+            )
+
+        return entries
+
+    def _real_extract(self, url):
+        show_id = self._match_id(url)
+
+        series = self._download_json(
+            '{}/api/v1/shows/{}'.format(self.api_domain, show_id),
+            show_id,
+        )
+
+        data0 = series['data'][0]
+        seasons = self._download_json(
+            self.api_domain + data0['links']['seasons'],
+            '{}_seasons'.format(show_id)
+        )
+
+        entries = []
+        for season in seasons['data']:
+            ep_link = self.api_domain + season['links']['episodes']
+            slug = season['attributes']['slug']
+            entries.extend(
+                self.get_season_episodes_pages(
+                    ep_link,
+                    slug,
+                ))
+
+        videos = [
+            self.url_result(entry) for entry in entries
+        ]
+
+        return {
+            '_type': 'playlist',
+            'id': show_id,
+            'title': data0['attributes']['title'],
+            'entries': videos
         }
